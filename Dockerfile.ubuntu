@@ -1,0 +1,149 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS source
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gpgv xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://poppler.freedesktop.org/poppler-${VERSION}.tar.xz /src/
+ADD https://poppler.freedesktop.org/poppler-${VERSION}.tar.xz.sig /src/
+# Poppler release signing key (Albert Astals Cid), fingerprint CA26 2C6C 83DE 4D2F B28A 332A 3A6A 4DB8 39EA A6D7.
+# A release signed by anyone else fails the gpgv check below until their key is added to keys/poppler-release.gpg.
+COPY keys/poppler-release.gpg /tmp/poppler-release.gpg
+WORKDIR /src
+RUN set -eu; \
+    gpgv --keyring /tmp/poppler-release.gpg "poppler-${VERSION}.tar.xz.sig" "poppler-${VERSION}.tar.xz"; \
+    mkdir poppler; \
+    tar -xJf "poppler-${VERSION}.tar.xz" -C poppler --strip-components=1
+
+FROM ${BASE_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+# The base image's packages are recorded before anything is installed, so that
+# runtime-deps can leave them out. Every image that installs runtime-deps is
+# built on the same base.
+RUN dpkg-query -W -f '${Package}\n' | sort -u > /tmp/base-packages \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      libcairo2-dev \
+      libfontconfig-dev \
+      libfreetype-dev \
+      libharfbuzz-dev \
+      libjpeg-dev \
+      liblcms2-dev \
+      libnss3-dev \
+      libopenjp2-7-dev \
+      libpng-dev \
+      libtiff-dev \
+      pkgconf \
+      zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY --link --from=source /src/poppler /src/poppler
+WORKDIR /src/poppler
+ARG JOBS
+# The command-line utilities and libpoppler, without the Qt, GLib and C++
+# wrappers, the test programs, libcurl (remote files) and the GnuPG signature
+# backend. NSS verifies and makes signatures in pdfsig. The encoding data is
+# the distro's poppler-data package in /usr/share/poppler. The build stops
+# when an output format or decoder the images promise was not found.
+RUN set -eu; \
+    set -- \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DPOPPLER_DATADIR=/usr/share/poppler \
+      -DENABLE_UTILS=ON \
+      -DENABLE_CPP=OFF \
+      -DENABLE_GLIB=OFF \
+      -DENABLE_GOBJECT_INTROSPECTION=OFF \
+      -DENABLE_QT5=OFF \
+      -DENABLE_QT6=OFF \
+      -DENABLE_BOOST=OFF \
+      -DENABLE_LIBCURL=OFF \
+      -DENABLE_GPGME=OFF \
+      -DENABLE_NSS3=ON \
+      -DENABLE_HARFBUZZ=ON \
+      -DENABLE_LIBJPEG=ON \
+      -DENABLE_LIBOPENJPEG=ON \
+      -DENABLE_LIBTIFF=ON \
+      -DENABLE_LCMS=ON \
+      -DBUILD_GTK_TESTS=OFF \
+      -DBUILD_QT5_TESTS=OFF \
+      -DBUILD_QT6_TESTS=OFF \
+      -DBUILD_CPP_TESTS=OFF \
+      -DBUILD_MANUAL_TESTS=OFF; \
+    cmake -S . -B build "$@" 2>&1 | tee /tmp/cmake.log; \
+    echo "cmake: $*" > /tmp/cmake-options; \
+    sed -n '/^Building Poppler with support for:/,/^  command line utils:/p' /tmp/cmake.log > /tmp/cmake-features; \
+    for feature in 'font subsetting' 'cairo output' 'use libjpeg' 'use libpng' 'use libtiff' 'use nss3' 'use libopenjpeg2' 'use lcms2' 'command line utils'; do \
+      grep -Eq "^  ${feature}: +yes$" /tmp/cmake-features \
+        || { echo "poppler is configured without: ${feature}" >&2; exit 1; }; \
+    done; \
+    cmake --build build -j"${JOBS:-$(nproc)}"; \
+    DESTDIR=/out cmake --install build --strip; \
+    rm -rf /out/usr/local/include /out/usr/local/lib/cmake /out/usr/local/lib/pkgconfig /out/usr/local/share/man
+
+ARG BASE_IMAGE
+ARG VERSION
+# runtime-deps lists the packages that own the libraries the binaries load,
+# minus the base image's packages, plus the packages in runtime-deps.ubuntu:
+# fontconfig and the Liberation fonts for fonts that a PDF names without
+# embedding them, and poppler-data for CJK and Cyrillic text.
+RUN --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    meta=/out/usr/local/share/randomcontainers/poppler; \
+    mkdir -p "$meta/licenses"; \
+    cp COPYING COPYING3 "$meta/licenses/"; \
+    sed -n '/Bjoern Hoehrmann/,/^\/\/ SOFTWARE\.$/{s|^// \{0,1\}||;p;}' poppler/UTF.cc > "$meta/licenses/COPYING.utf8-decoder"; \
+    grep -q 'Permission is hereby granted' "$meta/licenses/COPYING.utf8-decoder"; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://poppler.freedesktop.org/poppler-${VERSION}.tar.xz" \
+      "https://poppler.freedesktop.org/poppler-${VERSION}.tar.xz.sig" \
+      "https://github.com/randomcontainers/poppler/releases/tag/v${VERSION}" \
+      > "$meta/source"; \
+    for tool in pdfattach pdfdetach pdffonts pdfimages pdfinfo pdfseparate pdfsig \
+      pdftocairo pdftohtml pdftoppm pdftops pdftotext pdfunite; do \
+      test -x "/out/usr/local/bin/${tool}"; \
+    done; \
+    LD_LIBRARY_PATH=/out/usr/local/lib /out/usr/local/bin/pdfinfo -v 2> /tmp/pdfinfo-version; \
+    test "$(sed -n 1p /tmp/pdfinfo-version)" = "pdfinfo version ${VERSION}"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(c++ --version | sed -n 1p)"; \
+      cat /tmp/cmake-options /tmp/cmake-features; \
+    } > "$meta/buildinfo"; \
+    find /out/usr/local -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
+      | xargs -0 env LD_LIBRARY_PATH=/out/usr/local/lib ldd > /tmp/ldd 2>&1 || true; \
+    if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | sort -u > /tmp/libs; \
+    test -s /tmp/libs; \
+    while read -r lib; do \
+      real="$(readlink -f "$lib")"; \
+      dpkg-query --search "*${real#/usr}"; \
+    done < /tmp/libs | cut -d: -f1 | sort -u | comm -23 - /tmp/base-packages > /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+COPY --link --from=build /out/usr/local/ /usr/local/
+# libpoppler is in /usr/local/lib and the programs have no RPATH, so the
+# loader finds it through the cache that ldconfig writes.
+RUN set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /usr/local/share/randomcontainers/poppler/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    ldconfig; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "pdftotext"]
+CMD ["-h"]
