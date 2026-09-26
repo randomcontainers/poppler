@@ -1,0 +1,186 @@
+name: poppler
+title: Poppler
+summary: Extracts text, images and attachments from PDF files, renders pages to PNG, JPEG, TIFF or SVG, and splits, merges and inspects PDFs.
+homepage: https://poppler.freedesktop.org/
+license: (GPL-2.0-only OR GPL-3.0-only) AND MIT
+source-release: true
+upstream:
+  source: html-index
+  url: https://poppler.freedesktop.org/releases.html
+  # Entries look like: <a href="poppler-26.09.0.tar.xz">poppler-26.09.0.tar.xz</a> (Thu Sep 3, 2026):
+  pattern: 'href="poppler-(?P<version>\d+\.\d+\.\d+)\.tar\.xz">[^<]*</a> \((?P<date>[A-Za-z]{3} [A-Za-z]{3} \d{1,2}, \d{4})\)'
+  versioning: loose
+  version: 26.09.0
+  artifact:
+    url: https://poppler.freedesktop.org/poppler-{version}.tar.xz
+    signature: https://poppler.freedesktop.org/poppler-{version}.tar.xz.sig
+    sha256: 8059eadb6805340768f138c465b57f8164c92b4a0773c37ef031ea6c0d987b2e
+image:
+  entrypoint: [pdftotext]
+  cmd: [-h]
+test:
+  - |
+    # pdfattach and pdfdetach exit with 99 after printing their version.
+    for tool in pdfattach pdfdetach pdffonts pdfimages pdfinfo pdfseparate pdfsig \
+      pdftocairo pdftohtml pdftoppm pdftops pdftotext pdfunite; do
+      "$tool" -v 2> version.txt || true
+      test "$(head -n 1 version.txt)" = "$tool version $VERSION"
+    done
+  - |
+    for f in /usr/local/bin/pdf* /usr/local/lib/libpoppler.so.*; do
+      test -e "$f"
+      ldd "$f" > ldd.txt 2>&1 || true
+      if grep -Eq 'not found|Error loading shared library|Error relocating' ldd.txt; then
+        echo "$f:" >&2
+        cat ldd.txt >&2
+        exit 1
+      fi
+    done
+    pdfsig -list-backends 2> backends.txt
+    grep -Fqx 'NSS (active)' backends.txt
+    # Fonts that PDF files name without embedding them resolve to the
+    # metric-compatible Liberation fonts.
+    test "$(fc-match -f '%{family[0]}' Helvetica)" = 'Liberation Sans'
+    test "$(fc-match -f '%{family[0]}' Times)" = 'Liberation Serif'
+    test "$(fc-match -f '%{family[0]}' Courier)" = 'Liberation Mono'
+  - |
+    # Writes the PDF files that this and the next tests use.
+    # pdf FILE OBJECT...: object 1 is the catalog; the offsets in the
+    # cross-reference table are exact.
+    pdf() {
+      out="$1"
+      shift
+      printf '%%PDF-1.7\n' > "$out"
+      : > offsets.txt
+      n=0
+      for obj in "$@"; do
+        n=$((n + 1))
+        wc -c < "$out" >> offsets.txt
+        printf '%d 0 obj\n%s\nendobj\n' "$n" "$obj" >> "$out"
+      done
+      start="$(wc -c < "$out")"
+      {
+        printf 'xref\n0 %d\n0000000000 65535 f \n' "$((n + 1))"
+        while read -r offset; do printf '%010d 00000 n \n' "$offset"; done < offsets.txt
+        printf 'trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' "$((n + 1))" "$start"
+      } >> "$out"
+    }
+    # stream DATA [DICT]: a stream object with its length.
+    stream() {
+      printf '<< %s/Length %d >>\nstream\n%s\nendstream' "${2:-}" "${#1}" "$1"
+    }
+    page() {
+      printf '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %s] /Resources %s /Contents %s 0 R >>' "$1" "$2" "$3"
+    }
+    helv='<< /Font << /F1 7 0 R >> >>'
+    pdf doc.pdf \
+      '<< /Type /Catalog /Pages 2 0 R >>' \
+      '<< /Type /Pages /Count 2 /Kids [3 0 R 5 0 R] >>' \
+      "$(page '300 100' "$helv" 4)" \
+      "$(stream 'BT /F1 24 Tf 20 40 Td (Hello from Poppler) Tj ET')" \
+      "$(page '300 100' "$helv" 6)" \
+      "$(stream 'BT /F1 24 Tf 20 40 Td (Second page) Tj ET')" \
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'
+    # A black square on the left half of a 20x10 point page.
+    pdf box.pdf \
+      '<< /Type /Catalog /Pages 2 0 R >>' \
+      '<< /Type /Pages /Count 1 /Kids [3 0 R] >>' \
+      "$(page '20 10' '<< >>' 4)" \
+      "$(stream '0 g 0 0 10 10 re f')"
+    # A 2x2 RGB image: red, green, blue and white pixels.
+    pdf image.pdf \
+      '<< /Type /Catalog /Pages 2 0 R >>' \
+      '<< /Type /Pages /Count 1 /Kids [3 0 R] >>' \
+      "$(page '20 20' '<< /XObject << /Im1 5 0 R >> >>' 4)" \
+      "$(stream 'q 20 0 0 20 0 0 cm /Im1 Do Q')" \
+      "$(stream 'FF000000FF000000FFFFFFFF>' '/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode ')"
+    # Japanese text in a font that is not embedded, encoded with the
+    # predefined UniJIS-UCS2-H CMap: U+65E5 U+672C U+8A9E.
+    pdf cjk.pdf \
+      '<< /Type /Catalog /Pages 2 0 R >>' \
+      '<< /Type /Pages /Count 1 /Kids [3 0 R] >>' \
+      "$(page '300 100' '<< /Font << /F1 5 0 R >> >>' 4)" \
+      "$(stream 'BT /F1 24 Tf 20 40 Td <65E5672C8A9E> Tj ET')" \
+      '<< /Type /Font /Subtype /Type0 /BaseFont /KozMinPr6N-Regular /Encoding /UniJIS-UCS2-H /DescendantFonts [6 0 R] >>' \
+      '<< /Type /Font /Subtype /CIDFontType0 /BaseFont /KozMinPr6N-Regular /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> /FontDescriptor 7 0 R >>' \
+      '<< /Type /FontDescriptor /FontName /KozMinPr6N-Regular /Flags 4 /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >>'
+
+    pdfinfo doc.pdf > info.txt 2> info.err
+    test ! -s info.err
+    grep -Eq '^Pages: +2$' info.txt
+    grep -Eq '^Page size: +300 x 100 pts' info.txt
+    pdffonts doc.pdf > fonts.txt
+    grep -Eq '^Helvetica +Type 1 +WinAnsi +no +no +no +7 +0$' fonts.txt
+    pdftotext doc.pdf doc.txt
+    test "$(tr -d '\f' < doc.txt | tr '\n' ,)" = 'Hello from Poppler,Second page,'
+    test "$(pdftotext -f 2 -l 2 doc.pdf - | tr -d '\f')" = 'Second page'
+    pdftotext -bbox doc.pdf bbox.html
+    grep -q '<word xMin="[0-9.]*" yMin="[0-9.]*" xMax="[0-9.]*" yMax="[0-9.]*">Poppler</word>' bbox.html
+    pdftohtml -i -stdout -q doc.pdf > doc.html
+    grep -q 'Poppler' doc.html
+    pdftops doc.pdf doc.ps
+    test "$(head -c 10 doc.ps)" = '%!PS-Adobe'
+  - |
+    # Pages rendered with Splash (pdftoppm) and Cairo (pdftocairo).
+    pdftoppm -gray -r 72 -singlefile doc.pdf hello 2> render.log
+    if [ -s render.log ]; then cat render.log >&2; exit 1; fi
+    test "$(head -c 15 hello.pgm)" = "$(printf 'P5\n300 100\n255\n')"
+    dark="$(tail -c 30000 hello.pgm | od -An -v -tu1 | tr -s ' ' '\n' | awk '$1 != "" && $1 < 128' | wc -l)"
+    test "$dark" -gt 200
+    pdftoppm -gray -r 72 -singlefile box.pdf box
+    test "$(head -c 13 box.pgm)" = "$(printf 'P5\n20 10\n255\n')"
+    tail -c 200 box.pgm | od -An -v -tu1 | tr -s ' ' '\n' | sed '/^$/d' > box.txt
+    test "$(sed -n '1p;20p;181p;200p' box.txt | tr '\n' ,)" = '0,255,0,255,'
+    pdftoppm -png -r 36 doc.pdf page
+    for f in page-1.png page-2.png; do test "$(head -c 4 "$f" | tail -c 3)" = PNG; done
+    pdftoppm -jpeg -r 36 -singlefile doc.pdf page
+    test "$(od -An -tx1 -N3 page.jpg | tr -d ' ')" = ffd8ff
+    pdftoppm -tiff -r 36 -singlefile doc.pdf page
+    case "$(head -c 2 page.tif)" in II | MM) ;; *) exit 1 ;; esac
+    pdftocairo -png -r 36 -singlefile doc.pdf cairo
+    test "$(head -c 4 cairo.png | tail -c 3)" = PNG
+    pdftocairo -svg -f 1 -l 1 doc.pdf page.svg
+    grep -q '<svg' page.svg
+    # Cairo embeds the font that stood in for Helvetica.
+    pdftocairo -pdf doc.pdf cairo.pdf
+    test "$(pdftotext cairo.pdf - | tr -d '\f' | tr '\n' ,)" = 'Hello from Poppler,Second page,'
+    pdffonts cairo.pdf > cairo-fonts.txt
+    grep -Eq '^[A-Z]{6}\+LiberationSans ' cairo-fonts.txt
+  - |
+    pdfseparate doc.pdf part-%d.pdf
+    pdfunite part-2.pdf part-1.pdf swapped.pdf
+    test "$(pdftotext swapped.pdf - | tr -d '\f' | tr '\n' ,)" = 'Second page,Hello from Poppler,'
+    printf 'attached file\n' > note.txt
+    pdfattach doc.pdf note.txt attached.pdf
+    pdfdetach -list attached.pdf > attachments.txt
+    test "$(cat attachments.txt)" = "$(printf '1 embedded files\n1: note.txt')"
+    pdfdetach -save 1 -o extracted.txt attached.pdf
+    cmp note.txt extracted.txt
+    pdfimages -list image.pdf > images.txt
+    test "$(awk 'NR == 3 { print $4, $5, $6, $7, $8 }' images.txt)" = '2 2 rgb 3 8'
+    pdfimages -png image.pdf image
+    test "$(head -c 4 image-000.png | tail -c 3)" = PNG
+    rc=0
+    pdfsig doc.pdf > signatures.txt 2> /dev/null || rc=$?
+    test "$rc" = 2
+    grep -Fq 'does not contain any signatures' signatures.txt
+  - |
+    # Predefined CJK CMaps and the Shift-JIS output encoding come from
+    # poppler-data; without it the text below extracts as nothing.
+    pdftotext cjk.pdf cjk.txt
+    test "$(head -c 9 cjk.txt | od -An -tx1 | tr -d ' \n')" = e697a5e69cace8aa9e
+    pdftotext -listenc > encodings.txt
+    grep -Fqx Shift-JIS encodings.txt
+    pdftotext -enc Shift-JIS cjk.pdf cjk-sjis.txt
+    test "$(head -c 6 cjk-sjis.txt | od -An -tx1 | tr -d ' \n')" = 93fa967b8cea
+examples:
+  - title: Extract the text of a PDF, keeping the layout of the page
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/poppler -layout input.pdf output.txt
+  - title: Render every page of a PDF to a 150 dpi PNG
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint pdftoppm ghcr.io/randomcontainers/poppler -png -r 150 input.pdf page
+  - title: Show the page count, page size and metadata of a PDF
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint pdfinfo ghcr.io/randomcontainers/poppler input.pdf
+  - title: Merge PDF files into one
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint pdfunite ghcr.io/randomcontainers/poppler first.pdf second.pdf merged.pdf
+  - title: Extract the images of a PDF in their original format
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint pdfimages ghcr.io/randomcontainers/poppler -all input.pdf image
