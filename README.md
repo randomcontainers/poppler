@@ -11,8 +11,6 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontain
   -layout input.pdf output.txt
 ```
 
-The same images can also be pulled as `randomcontainers.com/poppler`.
-
 The entrypoint runs `pdftotext` under `tini` in `/work`, so file names are relative to the directory you mount. Give `-` as the output file to print the text instead, and leave out `-layout` to get the text in reading order. The other utilities run with `--entrypoint`:
 
 ```sh
