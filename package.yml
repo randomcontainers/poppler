@@ -10,11 +10,11 @@ upstream:
   # Entries look like: <a href="poppler-26.09.0.tar.xz">poppler-26.09.0.tar.xz</a> (Thu Sep 3, 2026):
   pattern: 'href="poppler-(?P<version>\d+\.\d+\.\d+)\.tar\.xz">[^<]*</a> \((?P<date>[A-Za-z]{3} [A-Za-z]{3} \d{1,2}, \d{4})\)'
   versioning: loose
-  version: 26.09.0
+  version: 26.10.0
   artifact:
     url: https://poppler.freedesktop.org/poppler-{version}.tar.xz
     signature: https://poppler.freedesktop.org/poppler-{version}.tar.xz.sig
-    sha256: 8059eadb6805340768f138c465b57f8164c92b4a0773c37ef031ea6c0d987b2e
+    sha256: 6792cb7c69205007ad87d2e936cecc5b3a31fac29ab54ffc3175fdb6b2a6ce35
 image:
   entrypoint: [pdftotext]
   cmd: [-h]
