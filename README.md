@@ -65,7 +65,7 @@ Not included: the Qt, GLib and C++ interfaces and the headers for building again
 
 ## Default or slim
 
-Poppler's default image adds no other tools, so `latest` and `slim` are the same image, with the contents listed above. Use `latest` to run it and the `slim` tags as a base for your own image. The default image of [Tesseract](https://github.com/randomcontainers/tesseract) includes this build of Poppler, for OCR of PDF files.
+Poppler's default image adds no other tools, so `latest` and `slim` are the same image, with the contents listed above. Use `latest` to run it and the `slim` tags as a base for your own image. The default images of [Tesseract](https://github.com/randomcontainers/tesseract) and [ugrep](https://github.com/randomcontainers/ugrep) include this build of Poppler, for OCR of PDF files and for searching their text.
 
 ## Tags
 
